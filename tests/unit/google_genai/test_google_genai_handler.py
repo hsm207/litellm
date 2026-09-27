@@ -257,3 +257,57 @@ def test_citation_metadata_transformation():
 
     except Exception as e:
         pytest.fail(f"Citation metadata transformation failed: {e}")
+
+
+@pytest.mark.asyncio
+async def test_generate_content_adapter_preserves_proxy_server_request():
+    """
+    Ensure GenerateContentToCompletionHandler forwards proxy_server_request
+    to the downstream completion call so proxy spend logging captures the request body.
+    """
+    from litellm.types.router import GenericLiteLLMParams
+    from litellm.types.utils import Choices, Message, ModelResponse
+
+    handler = GenerateContentToCompletionHandler()
+
+    dummy_proxy_request = {
+        "url": "http://localhost:4000/v1beta/models/gemini-2.0-flash:generateContent",
+        "method": "POST",
+        "headers": {"content-type": "application/json"},
+        "body": {
+            "contents": [
+                {"role": "user", "parts": [{"text": "Hello, world!"}]}
+            ]
+        },
+    }
+
+    gemini_data = [
+        {"role": "user", "parts": [{"text": "Hello, world!"}]}
+    ]
+
+    mock_response = ModelResponse(
+        choices=[Choices(message=Message(content="Hi!", role="assistant"))]
+    )
+
+    # Spy on the inner completion call that the handler delegates to
+    with patch(
+        "litellm.google_genai.adapters.handler.litellm.acompletion",
+        new_callable=AsyncMock,
+    ) as mock_acompletion:
+        mock_acompletion.return_value = mock_response
+
+        await handler.async_generate_content_handler(
+            model="gemini-2.0-flash",
+            contents=gemini_data,
+            litellm_params=GenericLiteLLMParams(),
+            proxy_server_request=dummy_proxy_request,
+            metadata={"source": "unit_test"},
+        )
+
+        assert mock_acompletion.called, "Inner acompletion was not called"
+        called_kwargs = mock_acompletion.call_args.kwargs
+
+        assert "proxy_server_request" in called_kwargs, (
+            "proxy_server_request was dropped from completion_kwargs"
+        )
+        assert called_kwargs["proxy_server_request"] == dummy_proxy_request
